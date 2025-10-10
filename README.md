@@ -10,7 +10,7 @@ Get yourself an environment with MNE
 - install `pip install audio-extract`
 - install `pip install moviepy`
 - install `pip install opencv-python`
-- download pupilprep from https://github.com/jwdegee/pupilprep/tree/main and install it into your environment. Change path in XXXX to the location of the pupilprep package.
+- download pupilprep from https://github.com/jwdegee/pupilprep/tree/main and install it into your environment by navigating to the directory and running `pip install -e .` in the terminal
 
 ### Run
 ```python

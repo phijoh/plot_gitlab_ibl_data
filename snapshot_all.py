@@ -104,16 +104,16 @@ for subj in subjects:
 
 #%% PUPIL DATA
 for subj in subjects:
-    if not os.path.exists(os.path.join(figures_folder, subj + '_pupil_snapshot.png')):
-        try:
-            # EYETRACKING DATA FROM EYELINK ASC FILE
-            pupil_file_name = [s for s in os.listdir(os.path.join(folder_path, subj, 'raw_eyelink_data')) if s.endswith('.asc')]
-            utils.plot_snapshot_pupil(os.path.join(folder_path, subj, 'raw_eyelink_data', pupil_file_name[0]),
-                                    figures_folder, subj + '_pupil_snapshot.png')
-        except Exception as e:
-            print("skipped pupil snapshot, subject with error", subj, e)
-    else:
-        continue
+    # if not os.path.exists(os.path.join(figures_folder, subj + '_pupil_snapshot.png')):
+    try:
+        # EYETRACKING DATA FROM EYELINK ASC FILE
+        pupil_file_name = [s for s in os.listdir(os.path.join(folder_path, subj, 'raw_eyelink_data')) if s.endswith('.asc')]
+        utils.plot_snapshot_pupil(os.path.join(folder_path, subj, 'raw_eyelink_data', pupil_file_name[0]),
+                                figures_folder, subj + '_pupil_snapshot.png')
+    except Exception as e:
+        print("skipped pupil snapshot, subject with error", subj, e)
+    # else:
+    #     continue
 #%%
 for subj in subjects:
     if not os.path.exists(os.path.join(figures_folder, subj + '_audio_snapshot.png')):

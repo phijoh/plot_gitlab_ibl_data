@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 import matplotlib.dates as mdates
 from scipy import signal
 from moviepy.video.io.ffmpeg_tools import ffmpeg_extract_subclip
+import pupilprep.preprocess_pupil as pupilprep
 
 # https://int-brain-lab.github.io/iblenv/_autosummary/brainbox.behavior.pyschofit.html, has moved to its own package instead of brainbox
 try:
@@ -300,38 +301,98 @@ def plot_snapshot_behavior(data, folder_save, file_name_save):
     sns.despine(trim=True)
     fig.savefig(os.path.join(folder_save, file_name_save))
 
-def plot_snapshot_pupil(file_name, folder_save, fig_name):
+def epoch_df(df, fs, events, col_names=['pupil','pupil_int_lp_clean','xpos', 'ypos',], t_range=(-1.5, 5), bsl_range=None):
+    tmin, tmax = t_range
+    epoch_timepoints = np.arange(tmin, tmax, 1/fs) # TODO: see if you can get rid of this and just reindex
+    if bsl_range is not None:
+            bmin, bmax = bsl_range
+    epochs = []
+    for i, e in enumerate(events):
+        try:
+            ind = ((df['time']>(e[0]/fs+tmin))&
+                (df['time']<e[0]/fs+tmax))
+            epoch = df.loc[ind, ['time'] + col_names].reset_index(drop=True)
+            epoch_ts = epoch_timepoints[:ind.sum()]
+            epoch.loc[:,'time'] = epoch_ts
+            epoch.loc[:,'epoch'] = i
+            epoch.loc[:, 'condition'] = e[2]
+            if bsl_range is not None:
+                ind = ((epoch['time']>(bmin))&
+                (epoch['time']<bmax))
+                bsl = epoch.loc[ind][col_names].mean()
+                for n,val in bsl.items():
+                    epoch[n] -= val
+            epochs.append(epoch)
+        except Exception as e:
+            print(f'skipped epoch {i}: {e}')
+    epochs = pd.concat(epochs)
+    epochs = epochs.reset_index(drop=True)
+
+    return epochs
+
+def plot_snapshot_pupil(file_name, folder_save, fig_name, save_processed=True):
+    alf_path = os.path.join(os.path.abspath(os.path.join(file_name, '../..')),'alf')
+
     # %%
     # load pupil data:
     raw_et = mne.io.read_raw_eyelink(file_name)
     raw_et_df = raw_et.to_data_frame()
-    interp_et = mne.preprocessing.eyetracking.interpolate_blinks(raw_et, buffer=(0.05, 0.1), 
-                                                                    interpolate_gaze=True)
-    interp_et_df = interp_et.to_data_frame()
+    fs = raw_et.info['sfreq']
 
-    # find the channels, these may be left or right eye
-    pupil_chan = [c for c in interp_et_df.columns if 'pupil' in c][0]
-    x_chan = [c for c in interp_et_df.columns if 'x' in c][0]
-    y_chan = [c for c in interp_et_df.columns if 'y' in c][0]
+    # blink interpolation:
+    et = pupilprep.interpolate_blinks(raw_et, buffer=(0.05, 0.1))
 
-    # TODO: add temporal filters, see code JW
-    interp_et = interp_et.filter(0.01, 10, 
-                                    picks=pupil_chan,
-                                    method='iir',
-                                    fir_design='firwin', 
-                                    skip_by_annotation='edge')
+    # get events:
+    events = et.annotations.to_data_frame()
+    events['onset'] = et.annotations.onset
+
+    # get in right shape:
+    df = et.to_data_frame()
+    df.columns = [c.split('_')[0]+'_int' for c in df.columns]
+    df = df.loc[:,[c for c in df.columns if not 'time' in c]]
+    df = pd.concat((raw_et_df, df), axis=1)
+
+    # don't start or end with NaN
+    df.loc[df['pupil_int']==0, 'pupil_int'] = np.nan
+    columns = ['pupil_int', 'xpos_int', 'ypos_int']
+    df[columns] = df[columns].ffill(axis=0)
+    df[columns] = df[columns].bfill(axis=0)
+
+    # regress out eye position - this introduces a lot of artifacts so I will skip it
+    # pupilprep.regress_xy(df=df) 
     
-    # get raw annotations
-    annot = raw_et.annotations.to_data_frame()
-    annot['onset'] = raw_et.annotations.onset
+    # bandpass filter
+    pupilprep.temporal_filter(df=df, measure='pupil_int', 
+                    hp=0.01, lp=10, 
+                    order=3, fs=fs)
+    
+    # regress out pupil responses to blinks and saccades:
+    pupilprep.regress_blinks(df=df, events=events, interval=7,
+                   regress_blinks=True,
+                   regress_sacs=True, fs=fs)
+    
+    # # # find the channels, these may be left or right eye
+    raw_pupil_chan = [c for c in raw_et_df.columns if 'pupil' in c][0]
+    clean_pupil_chan = [c for c in df.columns if 'pupil' in c][-1]
+    x_chan = [c for c in df.columns if 'x' in c][0]
+    y_chan = [c for c in df.columns if 'y' in c][0]
 
-    # lock to stimulus onset, response and feedback
-    # get events - note that mne epoching squashes everything below 0 to 0, so use integers here for hte contrast levels
+    if save_processed:
+        print('saving...')
+        df.to_hdf(os.path.join(alf_path, 'processed_pupil.hdf'), key='pupil')
+
+    # put clean pupil data back in mne object
+    mne_info = mne.create_info(ch_names=[clean_pupil_chan], ch_types= ['pupil'], sfreq=fs)
+    processed_et = mne.io.RawArray(np.expand_dims(df[clean_pupil_chan].values, axis=0), mne_info)
+    processed_et = raw_et.add_channels([processed_et])
+
+    # # lock to stimulus onset, response and feedback
+    # # get events - note that mne epoching squashes everything below 0 to 0, so use integers here for hte contrast levels
     stim_events_dict = {"signed_contrast -0.02": -2, "signed_contrast -0.05": -5, "signed_contrast -0.10": -10, 
                         "signed_contrast -0.20": -20, "signed_contrast 0.00": 0, "signed_contrast 0.02": 2, "signed_contrast 0.05": 5,
                         "signed_contrast 0.10": 10, "signed_contrast 0.20": 20}
     events, _ = mne.events_from_annotations(raw_et, event_id=stim_events_dict)
-    epochs = mne.Epochs(interp_et, events,  tmin=-1.5, tmax=5, 
+    epochs = mne.Epochs(processed_et, events,  tmin=-1.5, tmax=5, 
                         baseline=(-1, 0), preload=True, reject=None)   
     stim_epochs_df = epochs.to_data_frame()
     stim_epochs_df['abs_contrast'] = np.abs(stim_epochs_df['condition'].astype(float))
@@ -339,12 +400,12 @@ def plot_snapshot_pupil(file_name, folder_save, fig_name):
 
     response_events_dict = {"response 1":1, "response -1":-1}
     events, _ = mne.events_from_annotations(raw_et, event_id=response_events_dict)
-    epochs = mne.Epochs(interp_et, events,  tmin=-1, tmax=3, baseline=None, preload=True, reject=None)   
+    epochs = mne.Epochs(processed_et, events,  tmin=-1, tmax=3, baseline=None, preload=True, reject=None)   
     resp_epochs_df = epochs.to_data_frame()
 
     feedback_events_dict = {"feedbackType 1":1, "feedbackType 0":0}
     events, _ = mne.events_from_annotations(raw_et, event_id=feedback_events_dict)
-    epochs = mne.Epochs(interp_et, events,  tmin=-1.5, tmax=5, baseline=None, preload=True, reject=None)   
+    epochs = mne.Epochs(processed_et, events,  tmin=-1.5, tmax=5, baseline=None, preload=True, reject=None)   
     fb_epochs_df = epochs.to_data_frame()
 
     # ================================= #
@@ -356,12 +417,12 @@ def plot_snapshot_pupil(file_name, folder_save, fig_name):
                                 layout='constrained', figsize=(12,8))
 
     #sns.lineplot(, x='time', y='pupil_left')
-    sns.lineplot(raw_et_df, x='time', y=pupil_chan, color='darkgrey', ax=axes['a'])
-    sns.lineplot(interp_et_df, x='time', y=pupil_chan, color='deepskyblue', ax=axes['a'])
+    sns.lineplot(df, x='time', y=raw_pupil_chan, color='darkgrey', ax=axes['a'])
+    sns.lineplot(df, x='time', y=clean_pupil_chan, color='deepskyblue', ax=axes['a'])
     axes['a'].set_xlabel('Time in session (seconds)')
 
     # stimulus-locked pupil
-    for axn, var in zip(['b', 'd', 'f'], [pupil_chan, x_chan, y_chan]):
+    for axn, var in zip(['b', 'd', 'f'], [clean_pupil_chan, x_chan, y_chan]):
         # sns.lineplot(data=stim_epochs_df, x='time', y=var, estimator=None, 
         #             hue='condition', palette='rocket', alpha=0.1, linewidth=0.5,
         #             legend=False,
@@ -373,7 +434,7 @@ def plot_snapshot_pupil(file_name, folder_save, fig_name):
                     legend=False, ax=axes[axn])
 
     # feedback-locked pupil
-    for axn, var in zip(['c', 'e', 'g'], [pupil_chan, x_chan, y_chan]):
+    for axn, var in zip(['c', 'e', 'g'], [clean_pupil_chan, x_chan, y_chan]):
         # sns.lineplot(data=fb_epochs_df, x='time', y=var, estimator=None, 
         #             hue='condition', legend=False, alpha=0.5,
         #             palette=['green', 'red'], hue_order=['1','0'],
@@ -400,9 +461,11 @@ def plot_snapshot_pupil(file_name, folder_save, fig_name):
     fig.suptitle(file_name)
     fig.tight_layout(rect=[0, 0.03, 1, 0.95])
     sns.despine(trim=True)
+    # %%
     fig.savefig(os.path.join(folder_save, fig_name))
 
 
+# %%
 def find_audio_onsets(spectogram_data, onset_freq_index, power_threshold, minimum_gap):
     impulse_inds = np.where(spectogram_data[onset_freq_index,:]>power_threshold)[0]
     audio_onsets = [impulse_inds[0]]
@@ -550,6 +613,7 @@ def process_audio(folder_path, subj, onset_freq = 5000):
     else:
         exp_end_time = exp_start_time + timedelta(seconds=(trials_df['feedback_sound.stopped'].tail(1).values-trials_df['sound_trial_start.started'].head(1).values)[0]+10)
     
+    # TODO: don't cut off anything at the end
     exp_dur = (exp_end_time-exp_start_time).total_seconds()
     cutoff_start_s = (exp_start_time-vid_start_time).total_seconds()
     cutoff_end_s = cutoff_start_s + exp_dur
@@ -567,18 +631,26 @@ def process_audio(folder_path, subj, onset_freq = 5000):
     data_short = data.astype('float')[:,0]
 
     audio_onsets_selected = []
-    threshold = 3000
-    min_gap = np.min(trials_df['response_time'])
-    while (len(audio_onsets_selected) < len(grating_onsets)) & (threshold > 500):
-        threshold -= 500
+    threshold = 2500
+    min_gap = np.min(trials_df['response_time'])-.1
+    while (len(audio_onsets_selected) < len(grating_onsets)) & (threshold > 50):
         audio_onsets, t = detect_freq_onsets(data_short, samplerate, onset_freq, 0.1, threshold)
         _, onset_indices = find_best_shift(t[audio_onsets], grating_onsets_shifted, (0,20), min_gap)
         audio_onsets_selected = audio_onsets[onset_indices>-1]
+        if threshold > 500:
+            threshold -= 500
+        else:
+            threshold -= 50
 
     audio_onsets_relative_to_start = t[audio_onsets_selected]
     np.save(os.path.join(alf_path, 'audio_onsets'), audio_onsets_relative_to_start)
 
     audio_onsets_shifted = t[audio_onsets_selected]-t[audio_onsets_selected[0]]
+
+    timepoints = np.arange(0, len(data_short)/samplerate, 1/samplerate)
+    # seconds = pd.to_datetime(timepoints, unit='s')
+    # seconds_array = np.array(pd.to_timedelta(seconds - seconds[0], unit='s').total_seconds())
+    np.save(os.path.join(alf_path, 'audio_times'), timepoints) 
 
     # check equal number of onsets and onsets within 150ms
     assert len(grating_onsets) == len(audio_onsets_selected), f'audio {len(audio_onsets_selected)} onsets, psychopy {len(grating_onsets)} onsets'
@@ -588,11 +660,6 @@ def process_audio(folder_path, subj, onset_freq = 5000):
     else:
         max_offset = np.round(np.max(np.abs(audio_onsets_shifted-grating_onsets_shifted))*1000, decimals=1)
         print(f'maximum offset between psychopy and audio is {max_offset} ms')
-
-    timepoints = np.arange(0, len(data_short)/samplerate, 1/samplerate)
-    # seconds = pd.to_datetime(timepoints, unit='s')
-    # seconds_array = np.array(pd.to_timedelta(seconds - seconds[0], unit='s').total_seconds())
-    np.save(os.path.join(alf_path, 'audio_times'), timepoints) 
 
 
 def find_best_shift(audio_onsets, grating_onsets_shifted, shift_start_end=(0,20), delta=0.2):
@@ -790,8 +857,9 @@ def process_video(folder_path, subj):
             print(f'attempt {attempt+1}, trying frame {selected_idx}')
             cap.set(cv2.CAP_PROP_POS_FRAMES, selected_idx)
             ret, frame = cap.read()
-            frame_bw = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            coords = find_mirror(frame_bw)
+            if ret:
+                frame_bw = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                coords = find_mirror(frame_bw)
             attempt += 1
         x, y, w, h = coords
         np.save(os.path.join(alf_path, 'mirror_coords'), coords)
@@ -842,7 +910,7 @@ def process_video(folder_path, subj):
         vid_onsets_secs[~onsets_not_nan] = np.nan
     np.save(os.path.join(alf_path, 'video_onsets'), vid_onsets_secs)
 
-    print(f'success: {len(np.sum(onsets_not_nan))} video onsets detected')
+    print(f'success: {np.sum(onsets_not_nan)} video onsets detected')
 
 
 def detect_video_onsets(frame_data, psychopy_onsets, search_window_t=0.2, sampling_rate=60):
@@ -850,12 +918,14 @@ def detect_video_onsets(frame_data, psychopy_onsets, search_window_t=0.2, sampli
     search_window_samples = int(search_window_t * sampling_rate)
     onset_idx = []
     for o in psychopy_onsets_samples:
-        search_window = frame_data[int(o)-search_window_samples:int(o)+search_window_samples]
-        # plt.plot(search_window)
-        if np.any(np.argmax((search_window - np.roll(search_window,1))[1:]>1)): 
-            increase_idx = np.argmax((search_window - np.roll(search_window,1))[1:]>1) + 1
-            onset_idx.append(int(o)-search_window_samples + increase_idx)
-            # plt.scatter(increase_idx, 250)
-        else: 
-            onset_idx.append(np.nan)
+        if o < len(frame_data):
+            search_window = frame_data[int(o)-search_window_samples:int(o)+search_window_samples]
+            # plt.plot(search_window)
+            if np.any(np.argmax((search_window - np.roll(search_window,1))[1:]>1)): 
+                increase_idx = np.argmax((search_window - np.roll(search_window,1))[1:]>1) + 1
+                onset_idx.append(int(o)-search_window_samples + increase_idx)
+                # plt.scatter(increase_idx, 250)
+            else: 
+                onset_idx.append(np.nan)
     return np.array(onset_idx)
+# %%

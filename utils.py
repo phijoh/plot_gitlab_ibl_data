@@ -339,8 +339,34 @@ def plot_snapshot_pupil(file_name, folder_save, fig_name, save_processed=True):
     raw_et_df = raw_et.to_data_frame()
     fs = raw_et.info['sfreq']
 
-    # blink interpolation:
-    et = pupilprep.interpolate_blinks(raw_et, buffer=(0.05, 0.1))
+    # custom blink detection based on pupil noise:
+    blink_detection_noise = False
+    if blink_detection_noise:
+        pupil = raw_et.get_data()[np.array([c == 'pupil' for c in raw_et.get_channel_types()]),:].ravel()
+        onsets, offsets = pupilprep.detect_blinks_pupil_noise(pupil, fs)
+        if len(onsets) > 0:
+            raw_et = pupilprep.set_custon_blink_annotations(raw_et, onsets, offsets)
+
+    # interpolate blinks:
+    print('interpolating {} Eyelink blinks'.format((raw_et.annotations.description == 'BAD_blink').sum()))
+    et = mne.preprocessing.eyetracking.interpolate_blinks(
+                    raw_et, buffer=(0.2, 0.2), interpolate_gaze=True)
+
+    # custom blink detection based on pupil slope:
+    blink_detection_slope = True
+    if blink_detection_slope:
+        pupil = et.get_data()[np.array([c == 'pupil' for c in raw_et.get_channel_types()]),:].ravel()
+        onsets_slope, offsets_slope = pupilprep.detect_blinks_pupil_slope(pupil, fs)
+        if len(onsets_slope) > 0:
+            et = pupilprep.set_custon_blink_annotations(et, onsets_slope, offsets_slope)
+
+    # interpolate blinks:
+    print('interpolating {} additional blinks'.format((et.annotations.description == 'BAD_blink').sum()))
+    et = mne.preprocessing.eyetracking.interpolate_blinks(
+                    et, buffer=(0.2, 0.2), interpolate_gaze=True)
+
+    # # blink interpolation:
+    # et = pupilprep.interpolate_blinks(raw_et, buffer=(0.05, 0.1))
 
     # get events:
     events = et.annotations.to_data_frame()
@@ -363,7 +389,7 @@ def plot_snapshot_pupil(file_name, folder_save, fig_name, save_processed=True):
     
     # bandpass filter
     pupilprep.temporal_filter(df=df, measure='pupil_int', 
-                    hp=0.01, lp=10, 
+                    hp=0., lp=10, 
                     order=3, fs=fs)
     
     # regress out pupil responses to blinks and saccades:
@@ -379,6 +405,8 @@ def plot_snapshot_pupil(file_name, folder_save, fig_name, save_processed=True):
 
     if save_processed:
         print('saving...')
+        if os.path.exists(os.path.join(alf_path, 'processed_pupil.hdf')):
+            os.remove(os.path.join(alf_path, 'processed_pupil.hdf'))
         df.to_hdf(os.path.join(alf_path, 'processed_pupil.hdf'), key='pupil')
 
     # put clean pupil data back in mne object

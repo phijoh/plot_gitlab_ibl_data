@@ -389,7 +389,7 @@ def plot_snapshot_pupil(file_name, folder_save, fig_name, save_processed=True):
     
     # bandpass filter
     pupilprep.temporal_filter(df=df, measure='pupil_int', 
-                    hp=0.01, lp=10, 
+                    hp=0., lp=10, 
                     order=3, fs=fs)
     
     # regress out pupil responses to blinks and saccades:
